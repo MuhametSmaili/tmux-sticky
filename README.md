@@ -3,7 +3,7 @@
 A process-preserving tmux sidebar for terminal applications.
 
 Each session owns one sidebar. Hiding parks the pane instead of restarting the application.
-The pane follows window changes within its session.
+The pane follows window changes within its session. An optional shared mode follows the foreground terminal across sessions.
 
 ## Local use
 
@@ -35,6 +35,24 @@ Configuration supports @sticky-command, @sticky-key, @sticky-side, @sticky-width
 The command inherits the invoking pane's directory on first launch.
 Hide/show preserves process identity. Kill intentionally closes the application.
 Automatic following and exit cleanup require loading sticky.tmux.
+
+## Session following
+
+```tmux
+# Default: independent sidebar per session.
+set -g @sticky-follow-sessions 'off'
+# Alternative: one shared sidebar across sessions.
+set -g @sticky-follow-sessions 'on'
+```
+
+Reload sticky.tmux to register client-session hooks.
+Shared mode retains process identity and hidden state, and ignores background/control clients.
+Only an explicit show/toggle can hand control to another interactive client.
+When the shared slot is empty, an existing session-owned sidebar can be adopted without a restart.
+
+Use --scope session or --scope shared with the CLI to inspect or close either instance.
+Close the shared instance with `./bin/tmux-sticky kill --scope shared` before returning to session-local mode.
+Changing configuration does not silently kill independent applications.
 
 ## Limits
 

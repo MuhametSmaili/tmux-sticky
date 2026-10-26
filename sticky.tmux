@@ -76,7 +76,7 @@ case "$existing" in
 esac
 previous=''
 if [ -n "$old" ] && [ "$old" != "$key" ]; then previous=$(binding "$old"); fi
-tmux bind-key -T prefix -N 'Toggle persistent sidebar' "$key" run-shell -b "exec $runner toggle --target '#{pane_id}' # tmux-sticky/toggle"
+tmux bind-key -T prefix -N 'Toggle persistent sidebar' "$key" run-shell -b "exec $runner toggle --target '#{pane_id}' --client #{q:client_name} # tmux-sticky/toggle"
 # Equivalent spellings refer to the same binding. Do not unbind it afterward.
 if [ -n "$previous" ] && [ "$previous" != "$existing" ]; then
     case "$previous" in *tmux-sticky/toggle*) tmux unbind-key -T prefix "$old" ;; esac
@@ -84,6 +84,7 @@ fi
 tmux set-option -gq @sticky-internal-key "$key"
 
 register_hook session-window-changed "follow '#{hook_session}'"
+register_hook client-session-changed "follow-client #{q:hook_client}"
 register_hook pane-exited cleanup
 register_hook pane-died cleanup
 register_hook after-kill-pane cleanup

@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """Public CLI/plugin integration tests. Never connects to the user's tmux server."""
+from contextlib import ExitStack
+import fcntl
 import os
 from pathlib import Path
+import pty
 import shlex
+import struct
 import subprocess
+import termios
+import threading
 import tempfile
 import time
 import unittest
@@ -61,6 +67,50 @@ class StickyTestCase(unittest.TestCase):
                     raise
                 time.sleep(0.03)
 
+    def attach(self, session, *, control=False):
+        resources = ExitStack()
+        self.addCleanup(resources.close)
+        env = dict(self.env, TERM="xterm-256color")
+        env.pop("TMUX", None)
+        env.pop("TMUX_PANE", None)
+        if control:
+            process = subprocess.Popen(["tmux", "-S", self.socket, "-C", "attach-session", "-t", session],
+                                       env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            for stream in (process.stdin, process.stdout, process.stderr):
+                resources.callback(stream.close)
+        else:
+            master, slave = pty.openpty()
+            resources.callback(os.close, master)
+            resources.callback(os.close, slave)
+            fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 160, 0, 0))
+            process = subprocess.Popen(["tmux", "-S", self.socket, "attach-session", "-t", session],
+                                       env=env, stdin=slave, stdout=slave, stderr=slave)
+            def drain():
+                try:
+                    while os.read(master, 65536):
+                        pass
+                except OSError:
+                    pass
+            threading.Thread(target=drain, daemon=True).start()
+        def close():
+            process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+        resources.callback(close)
+        found = []
+        def registered():
+            for line in self.tmux("list-clients", "-F", "#{client_pid} #{client_name}").splitlines():
+                pid, name = line.split(" ", 1)
+                if pid == str(process.pid):
+                    found.append(name)
+                    return
+            self.fail("Client has not attached yet")
+        self.eventually(registered)
+        return found[-1]
+
     def binding(self, key):
         lines = self.tmux("list-keys", "-T", "prefix").splitlines()
         return "\n".join(line for line in lines if shlex.split(line)[shlex.split(line).index("-T") + 2] == key)
@@ -69,3 +119,4 @@ class StickyTestCase(unittest.TestCase):
         result = subprocess.run(["sh", str(plugin)], env=self.env, text=True,
                                 capture_output=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
+

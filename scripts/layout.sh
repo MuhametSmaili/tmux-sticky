@@ -1,12 +1,12 @@
-# Window-local snapshots, indexed by the owning session under its existing lock.
+# Window-local snapshots, indexed by the active ownership scope under its lock.
 layout_prepare() (
     lp_window=$1
     [ -n "$lp_window" ] && [ "$(tmux display-message -p -t "$lp_window" '#{window_id}')" = "$lp_window" ] || fail 'Destination window no longer exists.'
     lp_owner=$(tmux show-option -wqv -t "$lp_window" @sticky-layout-owner)
-    [ -z "$lp_owner" ] || [ "$lp_owner" = "$session" ] || fail 'Window layout belongs to another sidebar.'
+    [ -z "$lp_owner" ] || [ "$lp_owner" = "$state_owner" ] || fail 'Window layout belongs to another sidebar.'
     lp_before=$(tmux display-message -p -t "$lp_window" '#{window_layout}')
     [ -n "$lp_before" ] || fail 'Could not read the destination layout.'
-    command tmux set-option -wq -t "$lp_window" @sticky-layout-owner "$session" \; \
+    command tmux set-option -wq -t "$lp_window" @sticky-layout-owner "$state_owner" \; \
         set-option -wq -t "$lp_window" @sticky-layout-before "$lp_before" \; \
         set-option -wq -t "$lp_window" @sticky-layout-after '' \; \
         set-option -wq -t "$lp_window" @sticky-layout-pane '' \; \
@@ -23,7 +23,7 @@ layout_checkpoint() (
     # Observe edits before removal, not just the resulting main geometry.
     for lc_window in $(get @sticky-state-layout-windows); do
         lc_owner=$(tmux show-option -wqv -t "$lc_window" @sticky-layout-owner 2>/dev/null || :)
-        [ "$lc_owner" = "$session" ] || continue
+        [ "$lc_owner" = "$state_owner" ] || continue
         lc_pane=$(tmux show-option -wqv -t "$lc_window" @sticky-layout-pane)
         lc_after=$(tmux show-option -wqv -t "$lc_window" @sticky-layout-after)
         [ -n "$lc_pane" ] && [ -n "$lc_after" ] || continue
@@ -40,7 +40,7 @@ layout_reconcile() (
         case "$lr_window" in @*) : ;; *) continue ;; esac
         [ "$(tmux display-message -p -t "$lr_window" '#{window_id}' 2>/dev/null || :)" = "$lr_window" ] || continue
         lr_owner=$(tmux show-option -wqv -t "$lr_window" @sticky-layout-owner 2>/dev/null || :)
-        [ "$lr_owner" = "$session" ] || continue
+        [ "$lr_owner" = "$state_owner" ] || continue
         lr_pane=$(tmux show-option -wqv -t "$lr_window" @sticky-layout-pane)
         lr_actual=''
         [ -z "$lr_pane" ] || lr_actual=$(tmux display-message -p -t "$lr_pane" '#{window_id}' 2>/dev/null || :)

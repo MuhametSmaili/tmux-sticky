@@ -1,5 +1,5 @@
 #!/bin/sh
-# One process-preserving sidebar per tmux session.
+# Process-preserving sidebars with session-local or shared ownership.
 set -eu
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 
@@ -19,21 +19,23 @@ tmux() (
 fail() { printf 'tmux-sticky: %s\n' "$*" >&2; exit 1; }
 usage() {
     printf '%s\n' 'Usage: tmux-sticky show|hide|toggle|kill|status [--target %pane]' \
-        '       [--side left|right] [--width 30%|40] [--focus on|off] [-- command args...]' \
-        '       tmux-sticky follow SESSION_ID' \
+        '       [--side left|right] [--width 30%|40] [--focus on|off] [--scope session|shared] [-- command args...]' \
+        '       tmux-sticky follow SESSION_ID | follow-client CLIENT_NAME' \
         '       tmux-sticky cleanup' \
         'Commands after -- are tmux shell-command arguments. See README.md.'
 }
 [ "$#" -gt 0 ] || { usage >&2; exit 2; }
 action=$1; shift
 case "$action" in -h|--help|help) usage; exit 0 ;; esac
-case "$action" in show|hide|toggle|kill|status|follow|cleanup|_reconcile) : ;; *) usage >&2; exit 2 ;; esac
+case "$action" in show|hide|toggle|kill|status|follow|follow-client|cleanup|_reconcile|_shared-reconcile) : ;; *) usage >&2; exit 2 ;; esac
 if [ "$action" = cleanup ]; then
     [ "$#" -eq 0 ] || { usage >&2; exit 2; }
+    sh "$0" _shared-reconcile || :
     sessions=$(tmux list-sessions -F '#{session_id} #{@sticky-parking-owner} #{@sticky-state-pane} #{@sticky-state-layout-windows}' 2>/dev/null | awk 'NF > 1 {print $1}')
     for sid in $sessions; do
         owner=$(tmux show-option -qv -t "$sid" @sticky-parking-owner 2>/dev/null || :)
         if [ -n "$owner" ]; then
+            [ "$owner" != shared ] || continue
             if ! tmux has-session -t "$owner" 2>/dev/null; then
                 tmux kill-session -t "$sid" 2>/dev/null || :
             fi
@@ -43,42 +45,18 @@ if [ "$action" = cleanup ]; then
     done
     exit 0
 fi
-side='' width='' focus='' session='' target=${TMUX_PANE:-}
-if [ "$action" = follow ] || [ "$action" = _reconcile ]; then
-    [ "$#" -eq 1 ] || { usage >&2; exit 2; }
-    session=$1; shift
-    tmux has-session -t "$session" 2>/dev/null || exit 0
-    session=$(tmux display-message -p -t "$session" '#{session_id}')
-fi
-while [ "$#" -gt 0 ]; do
-    case "$1" in
-        --target|--side|--width|--focus)
-            [ "$#" -ge 2 ] || fail "Missing value for $1"
-            case "$1" in
-                --target) target=$2 ;; --side) side=$2 ;;
-                --width) width=$2 ;; --focus) focus=$2 ;;
-            esac
-            shift 2 ;;
-        --) shift; break ;;
-        *) fail "Unknown option: $1" ;;
-    esac
-done
-if [ -z "$session" ]; then
-    [ -n "$target" ] || fail 'Run inside tmux or pass --target %pane.'
-    identity=$(tmux display-message -p -t "$target" '#{session_id} #{pane_id}') || fail 'Target pane does not exist.'
-    [ -n "$identity" ] || fail 'Target pane does not exist.'
-    session=${identity%% *}
-    target=${identity#* }
-    [ -n "$session" ] && [ -n "$target" ] || fail 'Target pane does not exist.'
-    owner=$(tmux show-option -pqv -t "$target" @sticky-owner 2>/dev/null || :)
-    [ -z "$owner" ] || session=$owner
-fi
-lock="tmux-sticky-${session#\$}"
+# shellcheck source=scripts/context.sh
+. "$ROOT/scripts/context.sh"
+# shellcheck source=scripts/clients.sh
+. "$ROOT/scripts/clients.sh"
+# Reject background event traffic before it can contend for the shared lock.
+if [ "$action" = follow-client ]; then client_read "$client" || exit 0; fi
 finish() {
     result=$?
     trap - 0
     if command -v repair_parking >/dev/null 2>&1; then repair_parking || :; fi
     if command -v layout_reconcile >/dev/null 2>&1; then layout_reconcile || :; fi
+    [ -z "${borrowed_lock:-}" ] || tmux wait-for -U "$borrowed_lock" >/dev/null 2>&1 || :
     tmux wait-for -U "$lock" >/dev/null 2>&1 || :
     exit "$result"
 }
@@ -87,20 +65,20 @@ trap finish 0
 trap 'exit 130' INT
 trap 'exit 143' TERM HUP
 
-get() { tmux show-option -qv -t "$session" "$1" 2>/dev/null || :; }
-put() { tmux set-option -q -t "$session" "$1" "$2"; }
-config() { tmux show-option -Aqv -t "$session" "$1" 2>/dev/null || :; }
-option() { value=$(config "$1"); printf '%s' "${value:-$2}"; }
+# shellcheck source=scripts/state.sh
+. "$ROOT/scripts/state.sh"
+# shellcheck source=scripts/shared.sh
+. "$ROOT/scripts/shared.sh"
 # shellcheck source=scripts/layout.sh
 . "$ROOT/scripts/layout.sh"
 repair_parking() {
     # Recover incomplete hides, including TERM between helper creation and move.
-    name="__tmux_sticky_${session#\$}"
+    name="__tmux_sticky_${state_owner#\$}"
     helper_owner=$(tmux show-option -qv -t "=$name:" @sticky-parking-owner 2>/dev/null || :)
-    [ -n "$helper_owner" ] && [ "$helper_owner" = "$session" ] || return 0
+    [ -n "$helper_owner" ] && [ "$helper_owner" = "$state_owner" ] || return 0
     helper_id=$(tmux display-message -p -t "=$name:" '#{session_id}') || return 0
     [ -n "$helper_id" ] || return 0
-    if ! tmux has-session -t "$session" 2>/dev/null; then
+    if [ "$scope" = session ] && ! tmux has-session -t "$session" 2>/dev/null; then
         tmux kill-session -t "$helper_id" 2>/dev/null || :
         return 0
     fi
@@ -116,7 +94,7 @@ repair_parking() {
         done
     else
         tmux kill-session -t "$helper_id" 2>/dev/null || :
-        if [ -n "$tracked" ] && [ "$actual" = "$session" ]; then
+        if [ -n "$tracked" ] && [ -n "$actual" ] && { [ "$scope" = shared ] || [ "$actual" = "$session" ]; }; then
             put @sticky-state-visible 1
             visible=1
         fi
@@ -126,6 +104,9 @@ clear_state() {
     put @sticky-state-pane ''
     put @sticky-state-visible 0
     pane=; visible=0
+    if [ "$scope" = shared ]; then
+        put @sticky-state-client ''; put @sticky-state-client-pid ''
+    fi
 }
 validate_width() {
     size=${width%\%}
@@ -134,7 +115,7 @@ validate_width() {
     case "$width" in *%) [ "$size" -le 90 ] || fail 'Percentage width must be between 1% and 90%.' ;; esac
 }
 check_window() {
-    [ "$(tmux display-message -p -t "$session" '#{session_grouped}')" != 1 ] || fail 'Grouped sessions are not supported.'
+    [ "$(tmux display-message -p -t "$1" '#{session_grouped}')" != 1 ] || fail 'Grouped sessions are not supported.'
     [ "$(tmux display-message -p -t "$1" '#{window_linked}')" != 1 ] || fail 'Linked windows are not supported.'
     [ "$(tmux display-message -p -t "$1" '#{window_zoomed_flag}')" != 1 ] || fail 'Unzoom the window before moving the sidebar.'
 }
@@ -149,6 +130,16 @@ place() {
     check_window "$pane"
     validate_width
     check_space "$dest"
+    if [ "$scope" = shared ]; then
+        src_session=$(tmux display-message -p -t "$pane" '#{session_id}')
+        dst_session=$(tmux display-message -p -t "$dest" '#{session_id}')
+        [ -n "$src_session" ] && [ -n "$dst_session" ] || fail 'Source or destination disappeared.'
+        src_parking=$(tmux show-option -qv -t "$src_session" @sticky-parking-owner)
+        src_count=$(tmux display-message -p -t "$pane" '#{session_windows}:#{window_panes}')
+        if [ "$src_session" != "$dst_session" ] && [ "$src_parking" != shared ] && [ "$src_count" = 1:1 ]; then
+            fail 'Cannot move the only pane out of its session. Create another window first.'
+        fi
+    fi
     # Older join-pane versions base percentages on one pane, even with -f.
     # check_space computed the requested columns from the full window width.
     set -- -d -f -h -l "$requested" -s "$pane" -t "$dest"
@@ -158,30 +149,42 @@ place() {
         set-option -wq -t "$dest" @sticky-layout-pane "$pane" \; \
         set-option -wqF -t "$dest" @sticky-layout-after '#{window_layout}' || fail 'Could not move the sidebar; its process was not restarted.'
 }
-layout_checkpoint
-pane=$(get @sticky-state-pane)
-visible=$(get @sticky-state-visible)
-if [ -n "$pane" ]; then
-    owner=$(tmux show-option -pqv -t "$pane" @sticky-owner 2>/dev/null || :)
-    if [ "$owner" != "$session" ]; then
-        clear_state
-    elif [ "$(tmux display-message -p -t "$pane" '#{pane_dead}')" = 1 ]; then
-        dead=$pane
-        clear_state
-        tmux kill-pane -t "$dead" 2>/dev/null || :
+refresh_state() {
+    layout_checkpoint
+    pane=$(get @sticky-state-pane)
+    visible=$(get @sticky-state-visible)
+    if [ -n "$pane" ]; then
+        owner=$(tmux show-option -pqv -t "$pane" @sticky-owner 2>/dev/null || :)
+        if [ "$owner" != "$state_owner" ]; then
+            clear_state
+        elif [ "$(tmux display-message -p -t "$pane" '#{pane_dead}')" = 1 ]; then
+            dead=$pane
+            clear_state
+            tmux kill-pane -t "$dead" 2>/dev/null || :
+        fi
     fi
-fi
 
-repair_parking
-layout_reconcile
-[ "$action" != _reconcile ] || exit 0
+    repair_parking
+    layout_reconcile
+}
+# Expired shared state must be cleared before choosing a controller/adopting.
+if [ "$scope" = shared ]; then refresh_state; fi
+shared_context
+shared_adopt
+refresh_state
+# A candidate may exit while adoption is in flight. Bind a replacement again.
+if [ "$scope" = shared ] && [ -z "$(get @sticky-state-client)" ]; then
+    case "$action" in show|toggle|status) shared_context ;; esac
+fi
+case "$action" in _reconcile|_shared-reconcile) exit 0 ;; esac
 if [ "$action" = status ]; then
     state=absent; pid=
     if [ -n "$pane" ]; then
         state=parked; [ "$visible" != 1 ] || state=visible
         pid=$(tmux display-message -p -t "$pane" '#{pane_pid}')
     fi
-    printf 'state=%s\nsession=%s\npane=%s\npid=%s\n' "$state" "$session" "$pane" "$pid"
+    printf 'state=%s\nscope=%s\nsession=%s\npane=%s\npid=%s\n' "$state" "$scope" "$state_owner" "$pane" "$pid"
+    if [ "$scope" = shared ]; then printf 'client=%s\n' "$(get @sticky-state-client)"; fi
     exit 0
 fi
 
@@ -203,21 +206,23 @@ if [ "$action" = kill ]; then
 fi
 if [ "$action" = toggle ]; then
     action=show
-    [ "$visible" != 1 ] || action=hide
+    if [ "$visible" = 1 ]; then
+        if [ "$scope" = session ] || [ "$(tmux display-message -p -t "$pane" '#{window_id}')" = "$(tmux display-message -p -t "$target" '#{window_id}')" ]; then action=hide; fi
+    fi
 fi
 if [ "$action" = hide ]; then
     [ -n "$pane" ] && [ "$visible" = 1 ] || exit 0
     check_window "$pane"
-    windows=$(tmux display-message -p -t "$session" '#{session_windows}')
+    windows=$(tmux display-message -p -t "$pane" '#{session_windows}')
     panes=$(tmux display-message -p -t "$pane" '#{window_panes}')
     [ "$windows:$panes" != 1:1 ] || fail 'Cannot hide the only pane in its session. Create another window first.'
-    parking="__tmux_sticky_${session#\$}"
+    parking="__tmux_sticky_${state_owner#\$}"
     x=$(tmux display-message -p -t "$pane" '#{window_width}')
     y=$(tmux display-message -p -t "$pane" '#{window_height}')
     # This trusted command queue deliberately uses separators. Tag the helper
     # before returning, so exit recovery can identify it even if interrupted.
     placeholder=$(command tmux new-session -d -s "$parking" -n sticky -x "$x" -y "$y" -P -F '#{pane_id}' 'exec sleep 2147483647' \; \
-        set-option -q -t "=$parking:" @sticky-parking-owner "$session" \; \
+        set-option -q -t "=$parking:" @sticky-parking-owner "$state_owner" \; \
         set-option -q -t "=$parking:" destroy-unattached off) || fail 'Could not create the parking session (name already in use?).'
     put @sticky-state-visible 0
     if ! tmux join-pane -d -h -s "$pane" -t "$placeholder"; then
@@ -264,11 +269,11 @@ else
     done
     # Without -d, split-window updates the queue's target to the new pane.
     # Publish ownership/state before the client can report completion or fail.
-    set -- split-window "$@" \; set-option -pq @sticky-owner "$session" \; \
-        set-option -qF @sticky-state-pane '#{pane_id}' \; \
-        set-option -q @sticky-state-visible 1 \; \
-        set-option -q @sticky-state-side "$side" \; \
-        set-option -q @sticky-state-width "$width" \; \
+    set -- split-window "$@" \; set-option -pq @sticky-owner "$state_owner" \; \
+        set-option "-qF$state_flag" @sticky-state-pane '#{pane_id}' \; \
+        set-option "-q$state_flag" @sticky-state-visible 1 \; \
+        set-option "-q$state_flag" @sticky-state-side "$side" \; \
+        set-option "-q$state_flag" @sticky-state-width "$width" \; \
         set-option -wqF @sticky-layout-pane '#{pane_id}' \; \
         set-option -wqF @sticky-layout-after '#{window_layout}'
     [ "$focus" != off ] || set -- "$@" \; select-pane -t "$target"

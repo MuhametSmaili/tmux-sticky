@@ -57,6 +57,9 @@ def main():
             except OSError:
                 pass
         threading.Thread(target=drain, daemon=True).start()
+        shared = os.environ.get("STICKY_SMOKE_SHARED") == "1"
+        if shared:
+            test.tmux("set-option", "-g", "@sticky-follow-sessions", "on")
         test.install()
         test.tmux("split-window", "-d", "-h", "-t", test.target, "sleep", "600")
         main_layout = test.info(test.target, "window_layout")
@@ -79,11 +82,21 @@ def main():
         other = test.tmux("new-window", "-d", "-t", test.session, "-n", "destination", "-P", "-F", "#{pane_id}", "sleep", "600")
         # Keep smoke geometry deterministic across attached control clients.
         test.tmux("resize-window", "-t", other, "-x", "160", "-y", "50")
+        destination_layout = test.info(other, "window_layout")
         test.tmux("select-window", "-t", test.info(other, "window_id"))
         test.eventually(lambda: test.assertEqual(test.info(pane, "window_id"), test.info(other, "window_id")))
         test.assertEqual(test.status()["pid"], first["pid"])
         test.eventually(lambda: test.assertIn("stickyprobe", capture()))
         test.eventually(lambda: test.assertEqual(test.info(test.target, "window_layout"), main_layout))
+        if shared:
+            human = test.status()["client"]
+            project = test.tmux("new-session", "-d", "-s", "other-project", "-x", "160", "-y", "50", "-P", "-F", "#{pane_id}", "sleep", "600")
+            test.tmux("switch-client", "-c", human, "-t", test.info(project, "session_id"))
+            test.eventually(lambda: test.assertEqual(test.info(pane, "window_id"), test.info(project, "window_id")))
+            test.eventually(lambda: test.assertEqual(test.info(other, "window_layout"), destination_layout))
+            test.assertEqual(test.status(project)["pid"], first["pid"])
+            test.eventually(lambda: test.assertIn("stickyprobe", capture()))
+            print("PASS: the same borderless Hetki also follows sessions without restarting or losing its filter.")
         print("PASS: borderless Hetki retains PID/filter through hide/show/follow, and the original two-pane layout returns.")
         test.tmux("send-keys", "-t", pane, "C-u")
         test.tmux("send-keys", "-t", pane, "-l", "project")
