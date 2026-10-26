@@ -1,0 +1,267 @@
+#!/bin/sh
+# One process-preserving sidebar per tmux session.
+set -eu
+
+# A trailing semicolon is a tmux command separator even inside a shell argv.
+# Add the protocol escape without changing shell argument boundaries.
+tmux() (
+    remaining=$#
+    while [ "$remaining" -gt 0 ]; do
+        argument=$1; shift
+        case "$argument" in *';') argument="${argument%;}\\;" ;; esac
+        set -- "$@" "$argument"
+        remaining=$((remaining - 1))
+    done
+    command tmux "$@"
+)
+
+fail() { printf 'tmux-sticky: %s\n' "$*" >&2; exit 1; }
+usage() {
+    printf '%s\n' 'Usage: tmux-sticky show|hide|toggle|kill|status [--target %pane]' \
+        '       [--side left|right] [--width 30%|40] [--focus on|off] [-- command args...]' \
+        '       tmux-sticky follow SESSION_ID' \
+        '       tmux-sticky cleanup' \
+        'Commands after -- are tmux shell-command arguments. See README.md.'
+}
+[ "$#" -gt 0 ] || { usage >&2; exit 2; }
+action=$1; shift
+case "$action" in -h|--help|help) usage; exit 0 ;; esac
+case "$action" in show|hide|toggle|kill|status|follow|cleanup|_reconcile) : ;; *) usage >&2; exit 2 ;; esac
+if [ "$action" = cleanup ]; then
+    [ "$#" -eq 0 ] || { usage >&2; exit 2; }
+    sessions=$(tmux list-sessions -F '#{session_id}' 2>/dev/null) || exit 0
+    for sid in $sessions; do
+        owner=$(tmux show-option -qv -t "$sid" @sticky-parking-owner 2>/dev/null || :)
+        if [ -n "$owner" ]; then
+            if ! tmux has-session -t "$owner" 2>/dev/null; then
+                tmux kill-session -t "$sid" 2>/dev/null || :
+            fi
+        else
+            sh "$0" _reconcile "$sid" || :
+        fi
+    done
+    exit 0
+fi
+side='' width='' focus='' session='' target=${TMUX_PANE:-}
+if [ "$action" = follow ] || [ "$action" = _reconcile ]; then
+    [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+    session=$1; shift
+    tmux has-session -t "$session" 2>/dev/null || exit 0
+    session=$(tmux display-message -p -t "$session" '#{session_id}')
+fi
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --target|--side|--width|--focus)
+            [ "$#" -ge 2 ] || fail "Missing value for $1"
+            case "$1" in
+                --target) target=$2 ;; --side) side=$2 ;;
+                --width) width=$2 ;; --focus) focus=$2 ;;
+            esac
+            shift 2 ;;
+        --) shift; break ;;
+        *) fail "Unknown option: $1" ;;
+    esac
+done
+if [ -z "$session" ]; then
+    [ -n "$target" ] || fail 'Run inside tmux or pass --target %pane.'
+    identity=$(tmux display-message -p -t "$target" '#{session_id} #{pane_id}') || fail 'Target pane does not exist.'
+    [ -n "$identity" ] || fail 'Target pane does not exist.'
+    session=${identity%% *}
+    target=${identity#* }
+    [ -n "$session" ] && [ -n "$target" ] || fail 'Target pane does not exist.'
+    owner=$(tmux show-option -pqv -t "$target" @sticky-owner 2>/dev/null || :)
+    [ -z "$owner" ] || session=$owner
+fi
+lock="tmux-sticky-${session#\$}"
+finish() {
+    result=$?
+    trap - 0
+    if command -v repair_parking >/dev/null 2>&1; then repair_parking || :; fi
+    tmux wait-for -U "$lock" >/dev/null 2>&1 || :
+    exit "$result"
+}
+tmux wait-for -L "$lock"
+trap finish 0
+trap 'exit 130' INT
+trap 'exit 143' TERM HUP
+
+get() { tmux show-option -qv -t "$session" "$1" 2>/dev/null || :; }
+put() { tmux set-option -q -t "$session" "$1" "$2"; }
+config() { tmux show-option -Aqv -t "$session" "$1" 2>/dev/null || :; }
+option() { value=$(config "$1"); printf '%s' "${value:-$2}"; }
+repair_parking() {
+    # Recover incomplete hides, including TERM between helper creation and move.
+    name="__tmux_sticky_${session#\$}"
+    helper_owner=$(tmux show-option -qv -t "=$name:" @sticky-parking-owner 2>/dev/null || :)
+    [ -n "$helper_owner" ] && [ "$helper_owner" = "$session" ] || return 0
+    helper_id=$(tmux display-message -p -t "=$name:" '#{session_id}') || return 0
+    [ -n "$helper_id" ] || return 0
+    if ! tmux has-session -t "$session" 2>/dev/null; then
+        tmux kill-session -t "$helper_id" 2>/dev/null || :
+        return 0
+    fi
+    tracked=$(get @sticky-state-pane)
+    actual=''
+    [ -z "$tracked" ] || actual=$(tmux display-message -p -t "$tracked" '#{session_id}' 2>/dev/null || :)
+    if [ "$actual" = "$helper_id" ]; then
+        put @sticky-state-visible 0
+        visible=0
+        extras=$(tmux list-panes -s -t "$helper_id" -F '#{pane_id}') || return 0
+        for extra in $extras; do
+            [ "$extra" = "$tracked" ] || tmux kill-pane -t "$extra" 2>/dev/null || :
+        done
+    else
+        tmux kill-session -t "$helper_id" 2>/dev/null || :
+        if [ -n "$tracked" ] && [ "$actual" = "$session" ]; then
+            put @sticky-state-visible 1
+            visible=1
+        fi
+    fi
+}
+clear_state() {
+    put @sticky-state-pane ''
+    put @sticky-state-visible 0
+    pane=; visible=0
+}
+validate_width() {
+    size=${width%\%}
+    case "$size" in ''|*[!0-9]*|0*) fail 'Width must be positive columns or a percentage, without leading zeros.' ;; esac
+    [ "${#size}" -le 4 ] || fail 'Width is out of range.'
+    case "$width" in *%) [ "$size" -le 90 ] || fail 'Percentage width must be between 1% and 90%.' ;; esac
+}
+check_window() {
+    [ "$(tmux display-message -p -t "$session" '#{session_grouped}')" != 1 ] || fail 'Grouped sessions are not supported.'
+    [ "$(tmux display-message -p -t "$1" '#{window_linked}')" != 1 ] || fail 'Linked windows are not supported.'
+    [ "$(tmux display-message -p -t "$1" '#{window_zoomed_flag}')" != 1 ] || fail 'Unzoom the window before moving the sidebar.'
+}
+check_space() {
+    columns=$(tmux display-message -p -t "$1" '#{window_width}')
+    requested=$size
+    case "$width" in *%) requested=$((columns * size / 100)) ;; esac
+    [ "$requested" -ge 5 ] && [ "$((columns - requested - 1))" -ge 10 ] || fail 'Window too narrow: leave at least 5 sidebar columns and 10 main columns.'
+}
+place() {
+    check_window "$dest"
+    check_window "$pane"
+    validate_width
+    check_space "$dest"
+    set -- -d -f -h -l "$width" -s "$pane" -t "$dest"
+    [ "$side" != left ] || set -- -b "$@"
+    tmux join-pane "$@" || fail 'Could not move the sidebar; its process was not restarted.'
+}
+pane=$(get @sticky-state-pane)
+visible=$(get @sticky-state-visible)
+if [ -n "$pane" ]; then
+    owner=$(tmux show-option -pqv -t "$pane" @sticky-owner 2>/dev/null || :)
+    if [ "$owner" != "$session" ]; then
+        clear_state
+    elif [ "$(tmux display-message -p -t "$pane" '#{pane_dead}')" = 1 ]; then
+        dead=$pane
+        clear_state
+        tmux kill-pane -t "$dead" 2>/dev/null || :
+    fi
+fi
+
+repair_parking
+[ "$action" != _reconcile ] || exit 0
+if [ "$action" = status ]; then
+    state=absent; pid=
+    if [ -n "$pane" ]; then
+        state=parked; [ "$visible" != 1 ] || state=visible
+        pid=$(tmux display-message -p -t "$pane" '#{pane_pid}')
+    fi
+    printf 'state=%s\nsession=%s\npane=%s\npid=%s\n' "$state" "$session" "$pane" "$pid"
+    exit 0
+fi
+
+if [ "$action" = follow ]; then
+    [ -n "$pane" ] && [ "$visible" = 1 ] || exit 0
+    dest=$(tmux display-message -p -t "$session" '#{window_id}')
+    current=$(tmux display-message -p -t "$pane" '#{window_id}')
+    [ "$dest" != "$current" ] || exit 0
+    width=$(option @sticky-state-width 30%)
+    side=$(option @sticky-state-side right)
+    place
+    exit 0
+fi
+if [ "$action" = kill ]; then
+    dead=$pane
+    clear_state
+    [ -z "$dead" ] || tmux kill-pane -t "$dead" 2>/dev/null || :
+    exit 0
+fi
+if [ "$action" = toggle ]; then
+    action=show
+    [ "$visible" != 1 ] || action=hide
+fi
+if [ "$action" = hide ]; then
+    [ -n "$pane" ] && [ "$visible" = 1 ] || exit 0
+    check_window "$pane"
+    windows=$(tmux display-message -p -t "$session" '#{session_windows}')
+    panes=$(tmux display-message -p -t "$pane" '#{window_panes}')
+    [ "$windows:$panes" != 1:1 ] || fail 'Cannot hide the only pane in its session. Create another window first.'
+    parking="__tmux_sticky_${session#\$}"
+    x=$(tmux display-message -p -t "$pane" '#{window_width}')
+    y=$(tmux display-message -p -t "$pane" '#{window_height}')
+    # This trusted command queue deliberately uses separators. Tag the helper
+    # before returning, so exit recovery can identify it even if interrupted.
+    placeholder=$(command tmux new-session -d -s "$parking" -n sticky -x "$x" -y "$y" -P -F '#{pane_id}' 'exec sleep 2147483647' \; \
+        set-option -q -t "=$parking:" @sticky-parking-owner "$session" \; \
+        set-option -q -t "=$parking:" destroy-unattached off) || fail 'Could not create the parking session (name already in use?).'
+    put @sticky-state-visible 0
+    if ! tmux join-pane -d -h -s "$pane" -t "$placeholder"; then
+        # The server may have committed a move before the client failed.
+        # Reconcile actual pane ownership instead of killing a live application.
+        repair_parking
+        fail 'Parking did not finish cleanly. Check status before retrying.'
+    fi
+    tmux kill-pane -t "$placeholder"
+    exit 0
+fi
+[ "$action" = show ] || { usage >&2; exit 2; }
+[ -n "$side" ] || side=$(option @sticky-side right)
+[ -n "$width" ] || width=$(option @sticky-width 30%)
+[ -n "$focus" ] || focus=$(option @sticky-focus on)
+case "$side" in left|right) : ;; *) fail 'Side must be left or right.' ;; esac
+case "$focus" in on|off) : ;; *) fail 'Focus must be on or off.' ;; esac
+validate_width
+dest=$(tmux display-message -p -t "$target" '#{window_id}')
+check_window "$dest"
+check_space "$dest"
+if [ -n "$pane" ]; then
+    current=$(tmux display-message -p -t "$pane" '#{window_id}')
+    if [ "$current" != "$dest" ]; then
+        place
+    fi
+else
+    if [ "$#" -eq 0 ]; then
+        cmd=$(config @sticky-command)
+        [ -n "$cmd" ] || fail 'Set @sticky-command or pass a command after --.'
+        set -- "$cmd"
+    fi
+    cwd=$(tmux display-message -p -t "$target" '#{pane_current_path}')
+    set -- -f -h -l "$width" -c "$cwd" -t "$target" -P -F '#{pane_id}' "$@"
+    [ "$side" != left ] || set -- -b "$@"
+    # Escape application argv before appending trusted tmux queue separators.
+    remaining=$#
+    while [ "$remaining" -gt 0 ]; do
+        argument=$1; shift
+        case "$argument" in *';') argument="${argument%;}\\;" ;; esac
+        set -- "$@" "$argument"
+        remaining=$((remaining - 1))
+    done
+    # Without -d, split-window updates the queue's target to the new pane.
+    # Publish ownership/state before the client can report completion or fail.
+    set -- split-window "$@" \; set-option -pq @sticky-owner "$session" \; \
+        set-option -qF @sticky-state-pane '#{pane_id}' \; \
+        set-option -q @sticky-state-visible 1 \; \
+        set-option -q @sticky-state-side "$side" \; \
+        set-option -q @sticky-state-width "$width"
+    [ "$focus" != off ] || set -- "$@" \; select-pane -t "$target"
+    pane=$(command tmux "$@") || fail 'Opening did not finish cleanly. Check status before retrying.'
+fi
+put @sticky-state-pane "$pane"
+put @sticky-state-visible 1
+put @sticky-state-side "$side"
+put @sticky-state-width "$width"
+[ "$focus" != on ] || tmux select-pane -t "$pane"
