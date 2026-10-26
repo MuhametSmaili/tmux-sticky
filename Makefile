@@ -10,7 +10,9 @@ lint:
 	sh -n sticky.tmux
 	sh -n bin/tmux-sticky
 	sh -n scripts/run.sh
-	$(SHELLCHECK) -s sh sticky.tmux bin/tmux-sticky scripts/run.sh
+	sh -n scripts/layout.sh
+	awk -f scripts/layout-remove.awk </dev/null
+	$(SHELLCHECK) -x -s sh sticky.tmux bin/tmux-sticky scripts/run.sh
 
 smoke-hetki:
 	$(PYTHON) tests/hetki_smoke.py

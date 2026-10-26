@@ -1,6 +1,7 @@
 #!/bin/sh
 # One process-preserving sidebar per tmux session.
 set -eu
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 
 # A trailing semicolon is a tmux command separator even inside a shell argv.
 # Add the protocol escape without changing shell argument boundaries.
@@ -29,7 +30,7 @@ case "$action" in -h|--help|help) usage; exit 0 ;; esac
 case "$action" in show|hide|toggle|kill|status|follow|cleanup|_reconcile) : ;; *) usage >&2; exit 2 ;; esac
 if [ "$action" = cleanup ]; then
     [ "$#" -eq 0 ] || { usage >&2; exit 2; }
-    sessions=$(tmux list-sessions -F '#{session_id}' 2>/dev/null) || exit 0
+    sessions=$(tmux list-sessions -F '#{session_id} #{@sticky-parking-owner} #{@sticky-state-pane} #{@sticky-state-layout-windows}' 2>/dev/null | awk 'NF > 1 {print $1}')
     for sid in $sessions; do
         owner=$(tmux show-option -qv -t "$sid" @sticky-parking-owner 2>/dev/null || :)
         if [ -n "$owner" ]; then
@@ -77,6 +78,7 @@ finish() {
     result=$?
     trap - 0
     if command -v repair_parking >/dev/null 2>&1; then repair_parking || :; fi
+    if command -v layout_reconcile >/dev/null 2>&1; then layout_reconcile || :; fi
     tmux wait-for -U "$lock" >/dev/null 2>&1 || :
     exit "$result"
 }
@@ -89,6 +91,8 @@ get() { tmux show-option -qv -t "$session" "$1" 2>/dev/null || :; }
 put() { tmux set-option -q -t "$session" "$1" "$2"; }
 config() { tmux show-option -Aqv -t "$session" "$1" 2>/dev/null || :; }
 option() { value=$(config "$1"); printf '%s' "${value:-$2}"; }
+# shellcheck source=scripts/layout.sh
+. "$ROOT/scripts/layout.sh"
 repair_parking() {
     # Recover incomplete hides, including TERM between helper creation and move.
     name="__tmux_sticky_${session#\$}"
@@ -145,10 +149,16 @@ place() {
     check_window "$pane"
     validate_width
     check_space "$dest"
-    set -- -d -f -h -l "$width" -s "$pane" -t "$dest"
+    # Older join-pane versions base percentages on one pane, even with -f.
+    # check_space computed the requested columns from the full window width.
+    set -- -d -f -h -l "$requested" -s "$pane" -t "$dest"
     [ "$side" != left ] || set -- -b "$@"
-    tmux join-pane "$@" || fail 'Could not move the sidebar; its process was not restarted.'
+    layout_prepare "$dest"
+    command tmux join-pane "$@" \; \
+        set-option -wq -t "$dest" @sticky-layout-pane "$pane" \; \
+        set-option -wqF -t "$dest" @sticky-layout-after '#{window_layout}' || fail 'Could not move the sidebar; its process was not restarted.'
 }
+layout_checkpoint
 pane=$(get @sticky-state-pane)
 visible=$(get @sticky-state-visible)
 if [ -n "$pane" ]; then
@@ -163,6 +173,7 @@ if [ -n "$pane" ]; then
 fi
 
 repair_parking
+layout_reconcile
 [ "$action" != _reconcile ] || exit 0
 if [ "$action" = status ]; then
     state=absent; pid=
@@ -239,6 +250,7 @@ else
         [ -n "$cmd" ] || fail 'Set @sticky-command or pass a command after --.'
         set -- "$cmd"
     fi
+    layout_prepare "$dest"
     cwd=$(tmux display-message -p -t "$target" '#{pane_current_path}')
     set -- -f -h -l "$width" -c "$cwd" -t "$target" -P -F '#{pane_id}' "$@"
     [ "$side" != left ] || set -- -b "$@"
@@ -256,7 +268,9 @@ else
         set-option -qF @sticky-state-pane '#{pane_id}' \; \
         set-option -q @sticky-state-visible 1 \; \
         set-option -q @sticky-state-side "$side" \; \
-        set-option -q @sticky-state-width "$width"
+        set-option -q @sticky-state-width "$width" \; \
+        set-option -wqF @sticky-layout-pane '#{pane_id}' \; \
+        set-option -wqF @sticky-layout-after '#{window_layout}'
     [ "$focus" != off ] || set -- "$@" \; select-pane -t "$target"
     pane=$(command tmux "$@") || fail 'Opening did not finish cleanly. Check status before retrying.'
 fi

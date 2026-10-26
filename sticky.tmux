@@ -40,8 +40,9 @@ register_hook() {
         index=$((index + 1))
         [ "$index" -le 31000 ] || fail "No free hook entry for $hook."
     done
-    command="exec $runner $action # tmux-sticky/$hook"
-    tmux set-hook -g "${hook}[$index]" "run-shell -b $(quote "$command")"
+    if [ "${3:-}" = direct ]; then command=$action
+    else command="run-shell -b $(quote "exec $runner $action # tmux-sticky/$hook")"; fi
+    tmux set-hook -g "${hook}[$index]" "$command"
     tmux set-option -gq "@sticky-internal-hook-$hook" "$index"
 }
 
@@ -85,4 +86,8 @@ tmux set-option -gq @sticky-internal-key "$key"
 register_hook session-window-changed "follow '#{hook_session}'"
 register_hook pane-exited cleanup
 register_hook pane-died cleanup
+register_hook after-kill-pane cleanup
 register_hook session-closed cleanup
+# Mark edits in tmux itself, before asynchronous exit cleanup can restore.
+layout_changed='#{&&:#{@sticky-layout-after},#{&&:#{!=:#{window_layout},#{@sticky-layout-after}},#{m:*#{@sticky-layout-pane} *,#{P:#{pane_id} }}}}'
+register_hook window-layout-changed "if-shell -F $(quote "$layout_changed") $(quote 'set-option -wq @sticky-layout-dirty tmux-sticky/window-layout-changed')" direct

@@ -12,7 +12,7 @@ Requirements: tmux 3.3+, a POSIX shell, and standard Unix tools.
 From the repository root, inside tmux:
 
 ```sh
-tmux set -g @sticky-command 'hetki --height 100% --preview'
+tmux set -g @sticky-command 'hetki --height 100% --preview --border none'
 ./sticky.tmux
 ```
 
@@ -39,8 +39,9 @@ Automatic following and exit cleanup require loading sticky.tmux.
 ## Limits
 
 Grouped sessions, linked windows, and zoomed/narrow destinations are refused.
-tmux can redistribute neighboring pane sizes when the sidebar leaves.
-This initial version does not restore the original layout.
+Main panes shrink while the sidebar is visible. Unchanged layouts return to their original proportions when it leaves.
+Detected manual edits and topology changes invalidate saved layouts instead of overwriting intentional changes.
+Restoration also covers application exit and manual sidebar closure. Unsupported layouts are left unchanged.
 
 ## Development
 
