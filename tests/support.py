@@ -2,6 +2,7 @@
 """Public CLI/plugin integration tests. Never connects to the user's tmux server."""
 from contextlib import ExitStack
 import fcntl
+import json
 import os
 from pathlib import Path
 import pty
@@ -48,7 +49,16 @@ class StickyTestCase(unittest.TestCase):
         return result
 
     def info(self, target, field):
-        return self.tmux("display-message", "-p", "-t", target, "#{" + field + "}")
+        value = self.tmux("display-message", "-p", "-t", target, "#{" + field + "}")
+        if field == "window_layout" and value.startswith("{"):
+            # Geometry comparisons must not include 3.8 focus/history/indexes.
+            def geometry(node):
+                return {key: [geometry(child) for child in item] if key == "c" else item
+                        for key, item in node.items() if key not in ("a", "l", "i")}
+            data = json.loads(value)
+            data["L"] = geometry(data["L"])
+            return json.dumps(data, separators=(",", ":"), sort_keys=True)
+        return value
 
     def status(self, target=None):
         return dict(line.split("=", 1) for line in self.cli("status", "--target", target or self.target).stdout.splitlines())

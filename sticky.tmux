@@ -16,17 +16,16 @@ tmux() (
 
 ROOT=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 RUNNER="$ROOT/scripts/run.sh"
+# shellcheck source=scripts/layout-format.sh
+. "$ROOT/scripts/layout-format.sh"
 
 fail() {
     printf 'tmux-sticky: %s\n' "$*" >&2
     tmux display-message "tmux-sticky: $*" 2>/dev/null || :
     exit 1
 }
-quote() {
-    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
-}
 # run-shell expands tmux formats. Escape literal hashes in installation paths.
-runner=$(quote "$(printf '%s' "$RUNNER" | sed 's/#/##/g')")
+runner=$(layout_quote "$(printf '%s' "$RUNNER" | sed 's/#/##/g')")
 
 register_hook() {
     hook=$1; action=$2
@@ -41,7 +40,7 @@ register_hook() {
         [ "$index" -le 31000 ] || fail "No free hook entry for $hook."
     done
     if [ "${3:-}" = direct ]; then command=$action
-    else command="run-shell -b $(quote "exec $runner $action # tmux-sticky/$hook")"; fi
+    else command="run-shell -b $(layout_quote "exec $runner $action # tmux-sticky/$hook")"; fi
     tmux set-hook -g "${hook}[$index]" "$command"
     tmux set-option -gq "@sticky-internal-hook-$hook" "$index"
 }
@@ -90,5 +89,7 @@ register_hook pane-died cleanup
 register_hook after-kill-pane cleanup
 register_hook session-closed cleanup
 # Mark edits in tmux itself, before asynchronous exit cleanup can restore.
-layout_changed='#{&&:#{@sticky-layout-after},#{&&:#{!=:#{window_layout},#{@sticky-layout-after}},#{m:*#{@sticky-layout-pane} *,#{P:#{pane_id} }}}}'
-register_hook window-layout-changed "if-shell -F $(quote "$layout_changed") $(quote 'set-option -wq @sticky-layout-dirty tmux-sticky/window-layout-changed')" direct
+layout_same_format='#{==:#{m/r:^[0-9a-fA-F],#{window_layout}},#{m/r:^[0-9a-fA-F],#{@sticky-layout-after}}}'
+layout_difference="#{?$layout_same_format,#{!=:$layout_format,#{@sticky-layout-after}},#{||:#{==:#{@sticky-layout-signature},},#{!=:$layout_signature,#{@sticky-layout-signature}}}}"
+layout_changed="#{&&:#{@sticky-layout-after},#{&&:$layout_difference,#{m:*#{@sticky-layout-pane} *,#{P:#{pane_id} }}}}"
+register_hook window-layout-changed "if-shell -F $(layout_quote "$layout_changed") $(layout_quote 'set-option -wq @sticky-layout-dirty tmux-sticky/window-layout-changed')" direct

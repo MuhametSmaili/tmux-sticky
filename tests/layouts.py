@@ -1,6 +1,7 @@
 """Layout preservation through the public CLI on isolated tmux servers."""
 import os
 import signal
+import subprocess
 
 from support import StickyTestCase
 
@@ -12,6 +13,33 @@ class StickyLayouts(StickyTestCase):
 
     def layout(self, target=None):
         return self.info(target or self.target, "window_layout")
+
+    def test_control_client_layout_events_do_not_invalidate_identical_geometry(self):
+        other = self.split()
+        self.attach(self.session)
+        before = self.layout()
+        self.install()
+        self.show()
+        self.tmux("select-pane", "-t", other)
+        self.attach(self.session, control=True)
+        raw = self.tmux("display-message", "-p", "-t", self.window, "#{window_layout}")
+        result = subprocess.run(["tmux", "-S", self.socket, "-C", "select-layout",
+                                 "-t", self.window, raw], env=self.env,
+                                text=True, capture_output=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.cli("hide")
+        self.assertEqual(self.layout(), before)
+
+    def test_focus_changes_do_not_invalidate_geometry_or_steal_focus_on_hide(self):
+        other = self.split()
+        before = self.layout()
+        self.install()
+        opened = self.show()
+        self.tmux("select-pane", "-t", other)
+        self.cli("hide")
+        self.assertEqual(self.layout(), before)
+        self.assertEqual(self.info(other, "pane_active"), "1")
+        self.assertEqual(self.status()["pid"], opened["pid"])
 
     def test_left_sidebar_restores_an_unequal_nested_layout(self):
         other = self.split()

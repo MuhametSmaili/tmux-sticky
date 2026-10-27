@@ -1,4 +1,6 @@
 # Window snapshots are scope-owned; claims and cleanup run in native queues.
+# shellcheck source=scripts/layout-format.sh
+. "$ROOT/scripts/layout-format.sh"
 layout_prepare() (
     lp_window=$1
     [ -n "$lp_window" ] && [ "$(tmux display-message -p -t "$lp_window" '#{window_id}')" = "$lp_window" ] || fail 'Destination window no longer exists.'
@@ -15,6 +17,7 @@ layout_prepare() (
     lp_claim="set-option -wq -t '$lp_window' @sticky-layout-owner '$state_owner';
         set-option -wq -t '$lp_window' @sticky-layout-before '';
         set-option -wq -t '$lp_window' @sticky-layout-after '';
+        set-option -wq -t '$lp_window' @sticky-layout-signature '';
         set-option -wq -t '$lp_window' @sticky-layout-pane '';
         set-option -wq -t '$lp_window' @sticky-layout-dirty '';"
     if [ "$scope" = shared ]; then
@@ -39,8 +42,12 @@ layout_checkpoint() (
         [ -n "$lc_pane" ] && [ -n "$lc_after" ] || continue
         lc_actual=$(tmux display-message -p -t "$lc_pane" '#{window_id}' 2>/dev/null || :)
         [ "$lc_actual" = "$lc_window" ] || continue
-        lc_current=$(tmux display-message -p -t "$lc_window" '#{window_layout}')
-        [ "$lc_current" = "$lc_after" ] || tmux set-option -wq -t "$lc_window" @sticky-layout-dirty edited
+        lc_current=$(tmux display-message -p -t "$lc_window" "$layout_format")
+        lc_expected=$(printf '%s\n' "$lc_after" | awk -f "$ROOT/scripts/layout-remove.awk") || lc_expected=''
+        lc_geometry=$(printf '%s\n' "$lc_current" | awk -f "$ROOT/scripts/layout-remove.awk") || lc_geometry=''
+        if [ -z "$lc_expected" ] || [ "$lc_expected" != "$lc_geometry" ]; then
+            tmux set-option -wq -t "$lc_window" @sticky-layout-dirty edited
+        fi
     done
 )
 
@@ -64,15 +71,17 @@ layout_reconcile() (
         lr_commands=''
         if [ -z "$lr_dirty" ] && [ -n "$lr_before" ] && [ -n "$lr_after" ] && [ -n "$lr_pane" ]; then
             lr_expected=$(printf '%s\n' "$lr_after" | awk -v pane="${lr_pane#%}" -f "$ROOT/scripts/layout-remove.awk") || lr_expected=''
-            lr_current=$(tmux display-message -p -t "$lr_window" '#{window_zoomed_flag} #{window_layout}')
-            if [ -n "$lr_expected" ] && [ "${lr_current%% *}" = 0 ] && [ "${lr_current#*,}" = "$lr_expected" ]; then
+            lr_current=$(tmux display-message -p -t "$lr_window" "#{window_zoomed_flag} $layout_format")
+            lr_geometry=$(printf '%s\n' "${lr_current#* }" | awk -f "$ROOT/scripts/layout-remove.awk") || lr_geometry=''
+            if [ -n "$lr_expected" ] && [ "${lr_current%% *}" = 0 ] && [ "$lr_geometry" = "$lr_expected" ]; then
                 # Recheck user geometry at application time, not just in shell.
-                lr_guard='#{&&:#{==:#{window_zoomed_flag},0},#{&&:#{==:#{@sticky-layout-dirty},},#{==:#{window_layout},#{@sticky-layout-check}}}}'
+                lr_guard="#{&&:#{==:#{window_zoomed_flag},0},#{&&:#{==:#{@sticky-layout-dirty},},#{==:$layout_format,#{@sticky-layout-check}}}}"
+                lr_restore=$(layout_quote "select-layout -t '$lr_window' '$lr_before'")
                 lr_commands="set-option -wq -t '$lr_window' @sticky-layout-check '${lr_current#* }';
-                    if-shell -Ft '$lr_window' '$lr_guard' \"select-layout -t '$lr_window' '$lr_before'\";"
+                    if-shell -Ft '$lr_window' '$lr_guard' $lr_restore;"
             fi
         fi
-        for lr_key in owner before after pane dirty check; do
+        for lr_key in owner before after pane dirty check signature; do
             lr_commands="$lr_commands set-option -wqu -t '$lr_window' '@sticky-layout-$lr_key';"
         done
         # Restoration and metadata removal must not erase a later scope's claim.

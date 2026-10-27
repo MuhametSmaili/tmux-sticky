@@ -11,6 +11,7 @@ lint:
 	sh -n bin/tmux-sticky
 	sh -n scripts/run.sh
 	sh -n scripts/layout.sh
+	sh -n scripts/layout-format.sh
 	sh -n scripts/context.sh
 	sh -n scripts/state.sh
 	sh -n scripts/clients.sh

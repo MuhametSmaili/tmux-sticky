@@ -158,10 +158,11 @@ place() {
     set -- -d -f -h -l "$requested" -s "$pane" -t "$dest"
     [ "$side" != left ] || set -- -b "$@"
     layout_prepare "$dest"
-    command tmux set-option -wqF -t "$dest" @sticky-layout-before '#{window_layout}' \; \
+    command tmux set-option -wqF -t "$dest" @sticky-layout-before "$layout_format" \; \
         join-pane "$@" \; \
         set-option -wq -t "$dest" @sticky-layout-pane "$pane" \; \
-        set-option -wqF -t "$dest" @sticky-layout-after '#{window_layout}' || fail 'Could not move the sidebar; its process was not restarted.'
+        set-option -wqF -t "$dest" @sticky-layout-after "$layout_format" \; \
+        set-option -wqF -t "$dest" @sticky-layout-signature "$layout_signature" || fail 'Could not move the sidebar; its process was not restarted.'
 }
 refresh_state() {
     layout_checkpoint
@@ -283,14 +284,15 @@ else
     done
     # Without -d, split-window updates the queue's target to the new pane.
     # Publish ownership/state before the client can report completion or fail.
-    set -- set-option -wqF -t "$dest" @sticky-layout-before '#{window_layout}' \; \
+    set -- set-option -wqF -t "$dest" @sticky-layout-before "$layout_format" \; \
         split-window "$@" \; set-option -pq @sticky-owner "$state_owner" \; \
         set-option "-qF$state_flag" @sticky-state-pane '#{pane_id}' \; \
         set-option "-q$state_flag" @sticky-state-visible 1 \; \
         set-option "-q$state_flag" @sticky-state-side "$side" \; \
         set-option "-q$state_flag" @sticky-state-width "$width" \; \
         set-option -wqF @sticky-layout-pane '#{pane_id}' \; \
-        set-option -wqF @sticky-layout-after '#{window_layout}'
+        set-option -wqF @sticky-layout-after "$layout_format" \; \
+        set-option -wqF @sticky-layout-signature "$layout_signature"
     [ "$focus" != off ] || set -- "$@" \; select-pane -t "$target"
     pane=$(command tmux "$@") || fail 'Opening did not finish cleanly. Check status before retrying.'
 fi
