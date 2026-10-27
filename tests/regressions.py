@@ -30,9 +30,11 @@ class StickyRegressions(StickyTestCase):
         for post in ['kill -TERM "$PPID"', 'exit 1']:
             with self.subTest(post=post):
                 wrapper.write_text(f'''#!/bin/sh
+opening=0
+for arg do [ "$arg" != split-window ] || opening=1; done
 {real} "$@"
 result=$?
-if [ "$1" = split-window ]; then
+if [ "$opening" = 1 ]; then
     {post}
 fi
 exit "$result"

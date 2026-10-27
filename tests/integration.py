@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Public behavior tests against isolated tmux servers."""
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 import fcntl
 import os
 from pathlib import Path
@@ -11,6 +12,7 @@ import signal
 import struct
 import subprocess
 import termios
+import threading
 import unittest
 
 from support import PLUGIN, ROOT, StickyTestCase
@@ -239,19 +241,32 @@ class StickyIntegration(StickyTestCase):
         self.eventually(lambda: self.assertEqual(self.info(opened["pane"], "window_id"), self.info(other, "window_id")))
 
     def test_real_prefix_binding_toggles_and_reports_errors_in_tmux(self):
+        resources = ExitStack()
+        self.addCleanup(resources.close)
         master, slave = pty.openpty()
+        resources.callback(os.close, master)
+        resources.callback(os.close, slave)
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 160, 0, 0))
         env = dict(self.env, TERM="xterm-256color")
         env.pop("TMUX", None)
         env.pop("TMUX_PANE", None)
         client = subprocess.Popen(["tmux", "-S", self.socket, "attach-session", "-t", self.session],
                                   env=env, stdin=slave, stdout=slave, stderr=slave)
-        os.close(slave)
         def close_client():
             client.terminate()
-            client.wait(timeout=5)
-            os.close(master)
-        self.addCleanup(close_client)
+            try:
+                client.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                client.kill()
+                client.wait(timeout=5)
+        resources.callback(close_client)
+        def drain():
+            try:
+                while os.read(master, 65536):
+                    pass
+            except OSError:
+                pass
+        threading.Thread(target=drain, daemon=True).start()
         self.tmux("set-option", "-g", "@sticky-command", "exec sleep 600")
         self.install()
         self.eventually(lambda: self.assertEqual(self.info(self.target, "session_attached"), "1"))

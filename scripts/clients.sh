@@ -49,7 +49,9 @@ shared_context() {
                 show|toggle)
                     put @sticky-state-client "$cx_name"
                     put @sticky-state-client-pid "$cx_pid"
-                    session=$cx_session; target=$cx_pane ;;
+                    if [ "${target_explicit:-0}" != 1 ]; then
+                        session=$cx_session; target=$cx_pane
+                    fi ;;
                 status)
                     if [ -z "$(get @sticky-state-client)" ]; then
                         put @sticky-state-client "$cx_name"

@@ -19,7 +19,7 @@ tmux() (
 fail() { printf 'tmux-sticky: %s\n' "$*" >&2; exit 1; }
 usage() {
     printf '%s\n' 'Usage: tmux-sticky show|hide|toggle|kill|status [--target %pane]' \
-        '       [--side left|right] [--width 30%|40] [--focus on|off] [--scope session|shared] [-- command args...]' \
+        '       [--side left|right] [--width 30%|40] [--focus on|off] [--scope session|shared] [--client CLIENT_NAME] [-- command args...]' \
         '       tmux-sticky follow SESSION_ID | follow-client CLIENT_NAME' \
         '       tmux-sticky cleanup' \
         'Commands after -- are tmux shell-command arguments. See README.md.'
@@ -54,6 +54,7 @@ if [ "$action" = follow-client ]; then client_read "$client" || exit 0; fi
 finish() {
     result=$?
     trap - 0
+    trap '' INT TERM HUP
     if command -v repair_parking >/dev/null 2>&1; then repair_parking || :; fi
     if command -v layout_reconcile >/dev/null 2>&1; then layout_reconcile || :; fi
     [ -z "${borrowed_lock:-}" ] || tmux wait-for -U "$borrowed_lock" >/dev/null 2>&1 || :
@@ -75,16 +76,24 @@ repair_parking() {
     # Recover incomplete hides, including TERM between helper creation and move.
     name="__tmux_sticky_${state_owner#\$}"
     helper_owner=$(tmux show-option -qv -t "=$name:" @sticky-parking-owner 2>/dev/null || :)
-    [ -n "$helper_owner" ] && [ "$helper_owner" = "$state_owner" ] || return 0
-    helper_id=$(tmux display-message -p -t "=$name:" '#{session_id}') || return 0
+    helper_id=''
+    if [ "$helper_owner" = "$state_owner" ]; then
+        helper_id=$(tmux display-message -p -t "=$name:" '#{session_id}' 2>/dev/null || :)
+    fi
+    tracked=$(get @sticky-state-pane)
+    actual=''
+    [ -z "$tracked" ] || actual=$(tmux display-message -p -t "$tracked" '#{session_id}' 2>/dev/null || :)
+    # A successful reopen destroys the empty helper before the client returns.
+    # Recover visibility from the pane even when that client fails or is killed.
+    if [ -n "$actual" ] && [ "$actual" != "$helper_id" ]; then
+        put @sticky-state-visible 1
+        visible=1
+    fi
     [ -n "$helper_id" ] || return 0
     if [ "$scope" = session ] && ! tmux has-session -t "$session" 2>/dev/null; then
         tmux kill-session -t "$helper_id" 2>/dev/null || :
         return 0
     fi
-    tracked=$(get @sticky-state-pane)
-    actual=''
-    [ -z "$tracked" ] || actual=$(tmux display-message -p -t "$tracked" '#{session_id}' 2>/dev/null || :)
     if [ "$actual" = "$helper_id" ]; then
         put @sticky-state-visible 0
         visible=0
@@ -123,7 +132,9 @@ check_space() {
     columns=$(tmux display-message -p -t "$1" '#{window_width}')
     requested=$size
     case "$width" in *%) requested=$((columns * size / 100)) ;; esac
-    [ "$requested" -ge 5 ] && [ "$((columns - requested - 1))" -ge 10 ] || fail 'Window too narrow: leave at least 5 sidebar columns and 10 main columns.'
+    if [ "$requested" -lt 5 ] || [ "$((columns - requested - 1))" -lt 10 ]; then
+        fail 'Window too narrow: leave at least 5 sidebar columns and 10 main columns.'
+    fi
 }
 place() {
     check_window "$dest"
@@ -133,7 +144,9 @@ place() {
     if [ "$scope" = shared ]; then
         src_session=$(tmux display-message -p -t "$pane" '#{session_id}')
         dst_session=$(tmux display-message -p -t "$dest" '#{session_id}')
-        [ -n "$src_session" ] && [ -n "$dst_session" ] || fail 'Source or destination disappeared.'
+        if [ -z "$src_session" ] || [ -z "$dst_session" ]; then
+            fail 'Source or destination disappeared.'
+        fi
         src_parking=$(tmux show-option -qv -t "$src_session" @sticky-parking-owner)
         src_count=$(tmux display-message -p -t "$pane" '#{session_windows}:#{window_panes}')
         if [ "$src_session" != "$dst_session" ] && [ "$src_parking" != shared ] && [ "$src_count" = 1:1 ]; then
@@ -145,7 +158,8 @@ place() {
     set -- -d -f -h -l "$requested" -s "$pane" -t "$dest"
     [ "$side" != left ] || set -- -b "$@"
     layout_prepare "$dest"
-    command tmux join-pane "$@" \; \
+    command tmux set-option -wqF -t "$dest" @sticky-layout-before '#{window_layout}' \; \
+        join-pane "$@" \; \
         set-option -wq -t "$dest" @sticky-layout-pane "$pane" \; \
         set-option -wqF -t "$dest" @sticky-layout-after '#{window_layout}' || fail 'Could not move the sidebar; its process was not restarted.'
 }
@@ -269,7 +283,8 @@ else
     done
     # Without -d, split-window updates the queue's target to the new pane.
     # Publish ownership/state before the client can report completion or fail.
-    set -- split-window "$@" \; set-option -pq @sticky-owner "$state_owner" \; \
+    set -- set-option -wqF -t "$dest" @sticky-layout-before '#{window_layout}' \; \
+        split-window "$@" \; set-option -pq @sticky-owner "$state_owner" \; \
         set-option "-qF$state_flag" @sticky-state-pane '#{pane_id}' \; \
         set-option "-q$state_flag" @sticky-state-visible 1 \; \
         set-option "-q$state_flag" @sticky-state-side "$side" \; \

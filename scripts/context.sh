@@ -1,5 +1,5 @@
 # Resolve the invocation separately from the lifetime/ownership of its state.
-scope='' scope_explicit=0 client='' session='' target=${TMUX_PANE:-}
+scope='' scope_explicit=0 client='' session='' target=${TMUX_PANE:-} target_explicit=0
 mode=$(tmux show-option -gqv @sticky-follow-sessions)
 case "$mode" in ''|off) mode=off ;; on) : ;; *) fail '@sticky-follow-sessions must be on or off.' ;; esac
 side='' width='' focus=''
@@ -21,7 +21,7 @@ while [ "$#" -gt 0 ]; do
         --target|--side|--width|--focus|--scope|--client)
             [ "$#" -ge 2 ] || fail "Missing value for $1"
             case "$1" in
-                --target) target=$2 ;; --side) side=$2 ;;
+                --target) target=$2; target_explicit=1 ;; --side) side=$2 ;;
                 --width) width=$2 ;; --focus) focus=$2 ;;
                 --scope) scope=$2; scope_explicit=1 ;; --client) client=$2 ;;
             esac
