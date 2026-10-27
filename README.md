@@ -4,6 +4,7 @@ A persistent tmux sidebar for any terminal application.
 Hide it, reopen it, or move between windows without restarting the process.
 
 Requires tmux 3.3a+, a POSIX shell, and standard Unix tools.
+On Linux, use 3.6+ to avoid an [older libutempter cleanup bug](docs/reference.md#linux-tmux-compatibility).
 
 ## Install
 

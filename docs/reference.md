@@ -64,6 +64,19 @@ Other session-owned applications remain untouched. Changing modes does not close
 - Automatic following, exit cleanup, and edit tracking require loading `sticky.tmux`.
 - Session/window-local hook arrays can shadow the plugin's global hooks. The plugin preserves those local arrays.
 
+## Linux tmux compatibility
+
+Linux tmux builds before 3.6 with libutempter can lose child-exit notifications.
+Ubuntu 24.04's tmux 3.4 package is affected: an exited process can remain a zombie,
+so the pane-died hook needed for automatic cleanup never runs.
+This is [upstream issue #4559](https://github.com/tmux/tmux/issues/4559),
+[fixed in tmux 3.6](https://github.com/tmux/tmux/commit/fa5f3cef3d651b0eb9abfa77fc37ccade81679b5).
+
+Use tmux 3.6+ on Linux, or compile an older version with `./configure --disable-utempter`.
+An existing server keeps its old version until restarted; do not close active work just to upgrade.
+For an already stranded dead sidebar, `bin/tmux-sticky cleanup` reconciles plugin state,
+but does not fix tmux's process reaping. CI tests 3.8 with libutempter and 3.3a without it.
+
 ## Troubleshooting
 
 Inspect `bin/tmux-sticky status`, `bin/tmux-sticky cleanup`, and `tmux show-messages`.

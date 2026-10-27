@@ -126,7 +126,17 @@ exit "$result"
         opened = self.show()
         self.tmux("set-option", "-p", "-t", opened["pane"], "remain-on-exit", "on")
         os.kill(int(opened["pid"]), signal.SIGTERM)
-        self.eventually(lambda: self.assertNotIn(opened["pane"], self.tmux("list-panes", "-a", "-F", "#{pane_id}").splitlines()))
+        try:
+            self.eventually(lambda: self.assertNotIn(opened["pane"], self.tmux("list-panes", "-a", "-F", "#{pane_id}").splitlines()))
+        except AssertionError:
+            panes = self.tmux("list-panes", "-a", "-F",
+                              "#{pane_id} dead=#{pane_dead} pid=#{pane_pid} owner=#{@sticky-owner} command=#{pane_current_command}")
+            process = subprocess.run(["ps", "-o", "pid=,ppid=,stat=,comm=", "-p", opened["pid"]],
+                                     capture_output=True, text=True, timeout=5)
+            hooks = self.tmux("show-hooks", "-g") + "\n" + self.tmux("show-hooks", "-gw")
+            messages = self.tmux("show-messages", check=False)
+            self.fail(f"Automatic cleanup timed out.\nPanes:\n{panes}\nProcess:\n{process.stdout}"
+                      f"\nHooks:\n{hooks}\nMessages:\n{messages}")
 
 
 if __name__ == "__main__":

@@ -14,9 +14,13 @@ jobs:
       matrix:
         include:
           - os: ubuntu-24.04
-            tmux: system
+            tmux: '3.8'
+            sha256: e79c699c7e949dccd0a4a125e17b8d1261e311b16979dbc8eb34542f3966d82e
+            utempter: enable
           - os: ubuntu-24.04
-            tmux: 3.3a
+            tmux: '3.3a'
+            sha256: e4fd347843bd0772c4f48d6dde625b0b109b7a380ff15db21e97c11a4dcdf93f
+            utempter: disable
           - os: macos-latest
             tmux: system
     runs-on: ${{ matrix.os }}
@@ -29,19 +33,25 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y tmux shellcheck build-essential libevent-dev libncurses-dev bison pkg-config
+          sudo apt-get install -y shellcheck build-essential libevent-dev libncurses-dev libutempter-dev bison pkg-config
       - name: Install tools on macOS
         if: runner.os == 'macOS'
         run: brew install tmux shellcheck
-      - name: Build minimum supported tmux
-        if: matrix.tmux == '3.3a'
+      # Pre-3.6 libutempter builds can lose SIGCHLD (tmux/tmux#4559).
+      # Keep the minimum without it and exercise it on the fixed release.
+      - name: Build Linux tmux
+        if: runner.os == 'Linux'
+        env:
+          TMUX_VERSION: ${{ matrix.tmux }}
+          TMUX_SHA256: ${{ matrix.sha256 }}
+          TMUX_UTEMPTER: ${{ matrix.utempter }}
         run: |
           cd "$RUNNER_TEMP"
-          curl -fsSL --retry 3 https://github.com/tmux/tmux/releases/download/3.3a/tmux-3.3a.tar.gz -o tmux.tar.gz
-          echo 'e4fd347843bd0772c4f48d6dde625b0b109b7a380ff15db21e97c11a4dcdf93f  tmux.tar.gz' | sha256sum -c -
+          curl -fsSL --retry 3 "https://github.com/tmux/tmux/releases/download/$TMUX_VERSION/tmux-$TMUX_VERSION.tar.gz" -o tmux.tar.gz
+          printf '%s  tmux.tar.gz\n' "$TMUX_SHA256" | sha256sum -c -
           tar -xzf tmux.tar.gz
-          cd tmux-3.3a
-          ./configure
+          cd "tmux-$TMUX_VERSION"
+          ./configure "--$TMUX_UTEMPTER-utempter"
           make -j2
           mkdir -p "$RUNNER_TEMP/tmux-bin"
           cp tmux "$RUNNER_TEMP/tmux-bin/tmux"
